@@ -60,6 +60,7 @@ impl<'a> From<WireGuardError> for TunnResult<'a> {
 /// Tunnel represents a point-to-point WireGuard connection
 pub struct Tunn {
     handshake: Mutex<handshake::Handshake>, // The handshake currently in progress
+    old_stats: RwLock<session::SessionStats>, // Stores stats from sessions which have since ended
     sessions: [Arc<RwLock<Option<session::Session>>>; N_SESSIONS], // The N_SESSIONS most recent sessions, index is session id modulo N_SESSIONS
     current: AtomicUsize, // Index of most recently used session
     packet_queue: Mutex<VecDeque<Vec<u8>>>, // Queue to store blocked packets
@@ -145,6 +146,7 @@ impl Tunn {
                 )
                 .map_err(|_| "Invalid parameters")?,
             ),
+            old_stats: Default::default(),
             sessions: Default::default(),
             current: Default::default(),
             tx_bytes: Default::default(),
@@ -296,6 +298,16 @@ impl Tunn {
         })
     }
 
+    fn replace_session(&self, index: usize, session: session::Session) {
+        let old_stats = {
+            let mut s = self.sessions[index % N_SESSIONS].write();
+            let st = if let Some(s) = &*s { s.stats() } else { session::SessionStats::default() };
+            *s = Some(session);
+            st
+        };
+        self.old_stats.write().accumulate(&old_stats);
+    }
+
     fn handle_handshake_init<'a>(
         &self,
         p: HandshakeInit,
@@ -310,7 +322,7 @@ impl Tunn {
 
         // Store new session in ring buffer
         let index = session.local_index();
-        *self.sessions[index % N_SESSIONS].write() = Some(session);
+        self.replace_session(index, session);
 
         self.timer_tick(TimerName::TimeLastPacketReceived);
         self.timer_tick(TimerName::TimeLastPacketSent);
@@ -337,7 +349,7 @@ impl Tunn {
         // Store new session in ring buffer
         let l_idx = session.local_index();
         let index = l_idx % N_SESSIONS;
-        *self.sessions[index].write() = Some(session);
+        self.replace_session(index, session);
 
         self.timer_tick(TimerName::TimeLastPacketReceived);
         self.timer_tick_session_established(true, index); // New session established, we are the initiator
@@ -563,6 +575,21 @@ impl Tunn {
         }
     }
 
+    pub fn stats_detail(&self) -> Stats {
+        let cur_idx = self.current.load(Ordering::Relaxed);
+        let mut st = self.old_stats.read().clone();
+        let mut session_established = false;
+        for i in 0..N_SESSIONS {
+            if let Some(ref session) = *self.sessions[i].read() {
+                if i == cur_idx {
+                    session_established = true;
+                }
+                st.accumulate(&session.stats())
+            }
+        }
+        Stats{ cum_session_stats: st, session_established }
+    }
+
     /// Return stats from the tunnel:
     /// * Time since last handshake in seconds
     /// * Data bytes sent
@@ -584,6 +611,14 @@ impl Tunn {
     pub fn is_expired(&self) -> bool {
         self.handshake.lock().is_expired()
     }
+}
+
+pub struct Stats {
+    /// Cumulative stats on all sessions which have been used to date
+    cum_session_stats: session::SessionStats,
+
+    /// True if there is currently an active session -- i.e. a packet can be sent immediately
+    session_established: bool,
 }
 
 #[inline(always)]

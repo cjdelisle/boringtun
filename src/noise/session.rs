@@ -48,7 +48,7 @@ struct ReceivingKeyCounterValidator {
     // In order to avoid replays while allowing for some reordering of the packets, we keep a
     // bitmap of received packets, and the value of the highest counter
     next: u64,
-    receive_cnt: u64, // Used to estimate packet loss
+    stats: SessionStats,
     bitmap: [u64; N_WORDS as usize],
 }
 
@@ -88,16 +88,23 @@ impl ReceivingKeyCounterValidator {
 
     // Returns true if the counter was not yet received, and is not too far back
     #[inline(always)]
-    fn will_accept(&self, counter: u64) -> bool {
+    #[cfg(test)]
+    fn will_accept(&mut self, counter: u64) -> bool {
         if counter >= self.next {
             // As long as the counter is growing no replay took place for sure
             return true;
         }
         if counter + N_BITS < self.next {
             // Drop if too far back
+            self.stats.too_old_cnt += 1;
             return false;
         }
-        !self.check_bit(counter)
+        if self.check_bit(counter) {
+            self.stats.duplicate_cnt += 1;
+            false
+        } else {
+            true
+        }
     }
 
     // Marks the counter as received, and returns true if it is still good (in case during
@@ -106,6 +113,7 @@ impl ReceivingKeyCounterValidator {
     fn mark_did_receive(&mut self, counter: u64) -> Result<(), WireGuardError> {
         if counter + N_BITS < self.next {
             // Drop if too far back
+            self.stats.too_old_cnt += 1;
             return Err(WireGuardError::InvalidCounter);
         }
         if counter == self.next {
@@ -118,6 +126,7 @@ impl ReceivingKeyCounterValidator {
         if counter < self.next {
             // A packet arrived out of order, check if it is valid, and mark
             if self.check_bit(counter) {
+                self.stats.duplicate_cnt += 1;
                 return Err(WireGuardError::InvalidCounter);
             }
             self.set_bit(counter);
@@ -182,22 +191,12 @@ impl Session {
         self.receiving_index as usize
     }
 
-    // Returns true if receiving counter is good to use
-    fn receiving_counter_quick_check(&self, counter: u64) -> Result<(), WireGuardError> {
-        let counter_validator = self.receiving_key_counter.lock();
-        if counter_validator.will_accept(counter) {
-            Ok(())
-        } else {
-            Err(WireGuardError::InvalidCounter)
-        }
-    }
-
     // Returns true if receiving counter is good to use, and marks it as used {
     fn receiving_counter_mark(&self, counter: u64) -> Result<(), WireGuardError> {
         let mut counter_validator = self.receiving_key_counter.lock();
         let ret = counter_validator.mark_did_receive(counter);
         if ret.is_ok() {
-            counter_validator.receive_cnt += 1;
+            counter_validator.stats.received_cnt += 1;
         }
         ret
     }
@@ -267,8 +266,6 @@ impl Session {
         if packet.receiver_idx != self.receiving_index {
             return Err(WireGuardError::WrongIndex);
         }
-        // Don't reuse counters, in case this is a replay attack we want to quickly check the counter without running expensive decryption
-        self.receiving_counter_quick_check(packet.counter)?;
 
         #[cfg(not(target_arch = "arm"))]
         let ret = {
@@ -300,7 +297,36 @@ impl Session {
     // Returns the estimated downstream packet loss for this session
     pub(super) fn current_packet_cnt(&self) -> (u64, u64) {
         let counter_validator = self.receiving_key_counter.lock();
-        (counter_validator.next, counter_validator.receive_cnt)
+        (counter_validator.next, counter_validator.stats.received_cnt)
+    }
+
+    pub(super) fn stats(&self) -> SessionStats {
+        let counter_validator = self.receiving_key_counter.lock();
+        counter_validator.stats
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SessionStats {
+    /// Number of packets that we expect to receive
+    expected_cnt: u64,
+
+    /// Number of packets that we have received
+    received_cnt: u64,
+
+    /// Number of definite duplicate packets
+    duplicate_cnt: u64,
+
+    /// Number of packets which are too old to accept
+    too_old_cnt: u64,
+}
+
+impl SessionStats {
+    pub fn accumulate(&mut self, rhs: &SessionStats) {
+        self.expected_cnt += rhs.expected_cnt;
+        self.received_cnt += rhs.received_cnt;
+        self.duplicate_cnt += rhs.duplicate_cnt;
+        self.too_old_cnt += rhs.too_old_cnt;
     }
 }
 
