@@ -615,10 +615,10 @@ impl Tunn {
 
 pub struct Stats {
     /// Cumulative stats on all sessions which have been used to date
-    cum_session_stats: session::SessionStats,
+    pub cum_session_stats: session::SessionStats,
 
     /// True if there is currently an active session -- i.e. a packet can be sent immediately
-    session_established: bool,
+    pub session_established: bool,
 }
 
 #[inline(always)]

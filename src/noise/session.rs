@@ -309,16 +309,16 @@ impl Session {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SessionStats {
     /// Number of packets that we expect to receive
-    expected_cnt: u64,
+    pub expected_cnt: u64,
 
     /// Number of packets that we have received
-    received_cnt: u64,
+    pub received_cnt: u64,
 
     /// Number of definite duplicate packets
-    duplicate_cnt: u64,
+    pub duplicate_cnt: u64,
 
     /// Number of packets which are too old to accept
-    too_old_cnt: u64,
+    pub too_old_cnt: u64,
 }
 
 impl SessionStats {
