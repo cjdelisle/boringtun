@@ -575,6 +575,11 @@ impl Tunn {
         }
     }
 
+    pub fn is_established(&self) -> bool {
+        let cur_idx = self.current.load(Ordering::Relaxed);
+        self.sessions[cur_idx % N_SESSIONS].read().is_some()
+    }
+
     pub fn stats_detail(&self) -> Stats {
         let cur_idx = self.current.load(Ordering::Relaxed);
         let mut st = self.old_stats.read().clone();
