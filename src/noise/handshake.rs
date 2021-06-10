@@ -246,6 +246,11 @@ impl NoiseParams {
         })
     }
 
+    /// Change the preshared key
+    fn set_preshared_key(&mut self, preshared_key: Option<[u8; 32]>) {
+        self.preshared_key = preshared_key;
+    }
+
     /// Set a new private key
     fn set_static_private(
         &mut self,
@@ -331,6 +336,11 @@ impl Handshake {
         let idx8 = index as u8;
         self.next_index = (index & !0xff) | u32::from(idx8.wrapping_add(1));
         self.next_index
+    }
+
+    /// Change the preshared key
+    pub(crate) fn set_preshared_key(&mut self, preshared_key: Option<[u8; 32]>) {
+        self.params.preshared_key = preshared_key;
     }
 
     pub(crate) fn set_static_private(

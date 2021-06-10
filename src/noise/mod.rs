@@ -190,6 +190,18 @@ impl Tunn {
         Ok(())
     }
 
+    /// Set the preshared key.
+    ///
+    /// We don't reset the rate limiter because we are not changing our static key and
+    /// the rate limiter only needs the static public key to be able to verify a handshake
+    ///
+    /// We also do not clear the existing sessions because there's nothing wrong with
+    /// continuing to use them, we're just going to use a new preshared key for the next
+    /// handshake.
+    pub fn set_preshared_key(&mut self, preshared_key: Option<[u8; 32]>) {
+        self.handshake.lock().set_preshared_key(preshared_key);
+    }
+
     /// Encapsulate a single packet from the tunnel interface.
     /// Returns TunnResult.
     /// # Panics
