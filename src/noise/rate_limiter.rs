@@ -187,7 +187,7 @@ impl RateLimiter {
                     let cookie_packet = self
                         .format_cookie_reply(sender_idx, cookie, mac1, dst)
                         .map_err(TunnResult::Err)?;
-                    return Err(TunnResult::WriteToNetwork(cookie_packet));
+                    return Err(TunnResult::WriteToNetwork(cookie_packet, None));
                 }
             }
         }

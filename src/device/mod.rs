@@ -564,7 +564,7 @@ impl<T: Tun, S: Sock> Device<T, S> {
                             peer.shutdown_endpoint(); // close open udp socket
                         }
                         TunnResult::Err(e) => error!(d.config.logger, "Timer error {:?}", e),
-                        TunnResult::WriteToNetwork(packet) => {
+                        TunnResult::WriteToNetwork(packet, _) => {
                             match endpoint_addr {
                                 SocketAddr::V4(_) => udp4.sendto(packet, endpoint_addr),
                                 SocketAddr::V6(_) => udp6.sendto(packet, endpoint_addr),
@@ -611,25 +611,30 @@ impl<T: Tun, S: Sock> Device<T, S> {
                     let parsed_packet =
                         match rate_limiter.verify_packet(Some(addr.ip()), packet, &mut t.dst_buf) {
                             Ok(packet) => packet,
-                            Err(TunnResult::WriteToNetwork(cookie)) => {
+                            Err(TunnResult::WriteToNetwork(cookie, _)) => {
                                 udp.sendto(cookie, addr);
                                 continue;
                             }
                             Err(_) => continue,
                         };
 
-                    let peer = match &parsed_packet {
+                    let (peer, half_handshake) = match &parsed_packet {
                         Packet::HandshakeInit(p) => {
-                            parse_handshake_anon(&private_key, &public_key, &p)
-                                .ok()
-                                .and_then(|hh| {
+                            match parse_handshake_anon(&private_key, &public_key, &p, None) {
+                                Ok(hh) => (
                                     d.peers
-                                        .get(&X25519PublicKey::from(&hh.peer_static_public[..]))
-                                })
+                                        .get(&X25519PublicKey::from(&hh.peer_static_public[..])),
+                                    Some(hh),
+                                ),
+                                Err(_) => (
+                                    None,
+                                    None,
+                                )
+                            }
                         }
-                        Packet::HandshakeResponse(p) => d.peers_by_idx.get(&(p.receiver_idx >> 8)),
-                        Packet::PacketCookieReply(p) => d.peers_by_idx.get(&(p.receiver_idx >> 8)),
-                        Packet::PacketData(p) => d.peers_by_idx.get(&(p.receiver_idx >> 8)),
+                        Packet::HandshakeResponse(p) => (d.peers_by_idx.get(&(p.receiver_idx >> 8)), None),
+                        Packet::PacketCookieReply(p) => (d.peers_by_idx.get(&(p.receiver_idx >> 8)), None),
+                        Packet::PacketData(p) => (d.peers_by_idx.get(&(p.receiver_idx >> 8)), None),
                     };
 
                     let peer = match peer {
@@ -641,11 +646,11 @@ impl<T: Tun, S: Sock> Device<T, S> {
                     let mut flush = false; // Are there packets to send from the queue?
                     match peer
                         .tunnel
-                        .handle_verified_packet(parsed_packet, &mut t.dst_buf[..])
+                        .handle_verified_packet(parsed_packet, &mut t.dst_buf[..], half_handshake)
                     {
                         TunnResult::Done => {}
                         TunnResult::Err(_) => continue,
-                        TunnResult::WriteToNetwork(packet) => {
+                        TunnResult::WriteToNetwork(packet, _) => {
                             flush = true;
                             udp.sendto(packet, addr);
                         }
@@ -663,7 +668,7 @@ impl<T: Tun, S: Sock> Device<T, S> {
 
                     if flush {
                         // Flush pending queue
-                        while let TunnResult::WriteToNetwork(packet) =
+                        while let TunnResult::WriteToNetwork(packet, _) =
                             peer.tunnel.decapsulate(None, &[], &mut t.dst_buf[..])
                         {
                             udp.sendto(packet, addr);
@@ -714,7 +719,7 @@ impl<T: Tun, S: Sock> Device<T, S> {
                     {
                         TunnResult::Done => {}
                         TunnResult::Err(e) => eprintln!("Decapsulate error {:?}", e),
-                        TunnResult::WriteToNetwork(packet) => {
+                        TunnResult::WriteToNetwork(packet, _) => {
                             flush = true;
                             udp.write(packet);
                         }
@@ -732,7 +737,7 @@ impl<T: Tun, S: Sock> Device<T, S> {
 
                     if flush {
                         // Flush pending queue
-                        while let TunnResult::WriteToNetwork(packet) =
+                        while let TunnResult::WriteToNetwork(packet, _) =
                             peer.tunnel.decapsulate(None, &[], &mut t.dst_buf[..])
                         {
                             udp.write(packet);
@@ -796,7 +801,7 @@ impl<T: Tun, S: Sock> Device<T, S> {
                     match peer.tunnel.encapsulate(src, &mut t.dst_buf[..]) {
                         TunnResult::Done => {}
                         TunnResult::Err(e) => error!(d.config.logger, "Encapsulate error {:?}", e),
-                        TunnResult::WriteToNetwork(packet) => {
+                        TunnResult::WriteToNetwork(packet, _) => {
                             let endpoint = peer.endpoint();
                             if let Some(ref conn) = endpoint.conn {
                                 // Prefer to send using the connected socket

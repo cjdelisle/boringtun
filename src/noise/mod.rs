@@ -46,7 +46,7 @@ const N_SESSIONS: usize = 8; // number of sessions in the ring, better keep a Po
 pub enum TunnResult<'a> {
     Done,
     Err(WireGuardError),
-    WriteToNetwork(&'a mut [u8]),
+    WriteToNetwork(&'a mut [u8], Option<Vec<u8>>),
     WriteToTunnelV4(&'a mut [u8], Ipv4Addr),
     WriteToTunnelV6(&'a mut [u8], Ipv6Addr),
 }
@@ -90,6 +90,7 @@ pub struct HandshakeInit<'a> {
     unencrypted_ephemeral: &'a [u8],
     encrypted_static: &'a [u8],
     encrypted_timestamp: &'a [u8],
+    encrypted_additional: &'a [u8],
 }
 
 #[derive(Debug)]
@@ -208,6 +209,24 @@ impl Tunn {
     /// Panics if dst buffer is too small.
     /// Size of dst should be at least src.len() + 32, and no less than 148 bytes.
     pub fn encapsulate<'a>(&self, src: &[u8], dst: &'a mut [u8]) -> TunnResult<'a> {
+        self.encapsulate_add1(src, dst, &[])
+    }
+
+    /// Encapsulate a single packet from the tunnel interface.
+    /// Accepts additional data which will be attached to the handshake if and only if it is
+    /// an initial handshake message (not a reply). Additional data will be encrypted but not
+    /// forward-secret, it can be used for additional handshake metadata but should not be used
+    /// for any sort of confidential payload.
+    /// Returns TunnResult.
+    /// # Panics
+    /// Panics if dst buffer is too small.
+    /// Size of dst should be at least src.len() + 32, and no less than 148 bytes.
+    #[cfg(feature = "additional_data")]
+    pub fn encapsulate_add<'a>(&self, src: &[u8], dst: &'a mut [u8], add: &[u8]) -> TunnResult<'a> {
+        self.encapsulate_add1(src, dst, add)
+    }
+
+    fn encapsulate_add1<'a>(&self, src: &[u8], dst: &'a mut [u8], add: &[u8]) -> TunnResult<'a> {
         let current = self.current.load(Ordering::SeqCst);
         if let Some(ref session) = *self.sessions[current % N_SESSIONS].read() {
             // Send the packet using an established session
@@ -218,13 +237,13 @@ impl Tunn {
                 self.timer_tick(TimerName::TimeLastDataPacketSent);
             }
             self.tx_bytes.fetch_add(src.len(), Ordering::Relaxed);
-            return TunnResult::WriteToNetwork(packet);
+            return TunnResult::WriteToNetwork(packet, None);
         }
 
         // If there is no session, queue the packet for future retry
         self.queue_packet(src);
         // Initiate a new handshake if none is in progress
-        self.format_handshake_initiation(dst, false)
+        self.format_handshake_initiation_add1(dst, false, add)
     }
 
     /// Receives a UDP datagram from the network and parses it.
@@ -249,24 +268,25 @@ impl Tunn {
             .verify_packet(src_addr, datagram, &mut cookie)
         {
             Ok(packet) => packet,
-            Err(TunnResult::WriteToNetwork(cookie)) => {
+            Err(TunnResult::WriteToNetwork(cookie, _)) => {
                 dst[..cookie.len()].copy_from_slice(cookie);
-                return TunnResult::WriteToNetwork(&mut dst[..cookie.len()]);
+                return TunnResult::WriteToNetwork(&mut dst[..cookie.len()], None);
             }
             Err(TunnResult::Err(e)) => return TunnResult::Err(e),
             _ => unreachable!(),
         };
 
-        self.handle_verified_packet(packet, dst)
+        self.handle_verified_packet(packet, dst, None)
     }
 
     pub(crate) fn handle_verified_packet<'a>(
         &self,
         packet: Packet,
         dst: &'a mut [u8],
+        half_handshake: Option<handshake::HalfHandshake>
     ) -> TunnResult<'a> {
         match packet {
-            Packet::HandshakeInit(p) => self.handle_handshake_init(p, dst),
+            Packet::HandshakeInit(p) => self.handle_handshake_init(p, dst, half_handshake),
             Packet::HandshakeResponse(p) => self.handle_handshake_response(p, dst),
             Packet::PacketCookieReply(p) => self.handle_cookie_reply(p),
             Packet::PacketData(p) => self.handle_data(p, dst),
@@ -284,12 +304,23 @@ impl Tunn {
         let packet_type = u32::from_le_bytes(make_array(&src[0..4]));
 
         Ok(match (packet_type, src.len()) {
-            (HANDSHAKE_INIT, HANDSHAKE_INIT_SZ) => Packet::HandshakeInit(HandshakeInit {
-                sender_idx: u32::from_le_bytes(make_array(&src[4..8])),
-                unencrypted_ephemeral: &src[8..40],
-                encrypted_static: &src[40..88],
-                encrypted_timestamp: &src[88..116],
-            }),
+            (HANDSHAKE_INIT, l) => {
+                if cfg!(feature = "additional_data") && l >= HANDSHAKE_INIT_SZ {
+                    // If we have enabled additional_data then packets can be bigger
+                } else if l == HANDSHAKE_INIT_SZ {
+                    // Otherwise they must be exactly HANDSHAKE_INIT_SZ
+                } else {
+                    return Err(WireGuardError::InvalidPacket);
+                }
+                Packet::HandshakeInit(HandshakeInit {
+                    sender_idx: u32::from_le_bytes(make_array(&src[4..8])),
+                    unencrypted_ephemeral: &src[8..40],
+                    encrypted_static: &src[40..88],
+                    encrypted_timestamp: &src[88..116],
+                    // Additional is anything between the header and the 32 bytes of mac1/mac2
+                    encrypted_additional: &src[116 .. src.len() - 32],
+                })
+            }
             (HANDSHAKE_RESP, HANDSHAKE_RESP_SZ) => Packet::HandshakeResponse(HandshakeResponse {
                 sender_idx: u32::from_le_bytes(make_array(&src[4..8])),
                 receiver_idx: u32::from_le_bytes(make_array(&src[8..12])),
@@ -324,12 +355,13 @@ impl Tunn {
         &self,
         p: HandshakeInit,
         dst: &'a mut [u8],
+        half_handshake: Option<handshake::HalfHandshake>,
     ) -> Result<TunnResult<'a>, WireGuardError> {
         debug!(self.logger, "Received handshake_initiation"; "remote_idx" => p.sender_idx);
 
-        let (packet, session) = {
+        let (packet, session, additional_data) = {
             let mut handshake = self.handshake.lock();
-            handshake.receive_handshake_initialization(p, dst)?
+            handshake.receive_handshake_initialization(p, dst, half_handshake)?
         };
 
         // Store new session in ring buffer
@@ -342,7 +374,7 @@ impl Tunn {
 
         debug!(self.logger, "Sending handshake_response"; "local_idx" => index);
 
-        Ok(TunnResult::WriteToNetwork(packet))
+        Ok(TunnResult::WriteToNetwork(packet, additional_data))
     }
 
     fn handle_handshake_response<'a>(
@@ -369,7 +401,7 @@ impl Tunn {
 
         debug!(self.logger, "Sending keepalive");
 
-        Ok(TunnResult::WriteToNetwork(keepalive_packet)) // Send a keepalive as a response
+        Ok(TunnResult::WriteToNetwork(keepalive_packet, None)) // Send a keepalive as a response
     }
 
     fn handle_cookie_reply<'a>(
@@ -433,10 +465,31 @@ impl Tunn {
 
     // Formats a new handshake initiation message and store it in dst. If force_resend is true will send
     // a new handshake, even if a handshake is already in progress (for example when a handshake times out)
+    #[cfg(feature = "additional_data")]
+    pub fn format_handshake_initiation_add<'a>(
+        &self,
+        dst: &'a mut [u8],
+        force_resend: bool,
+        add: &[u8],
+    ) -> TunnResult<'a> {
+        self.format_handshake_initiation_add1(dst, force_resend, add)
+    }
+
+    // Formats a new handshake initiation message and store it in dst. If force_resend is true will send
+    // a new handshake, even if a handshake is already in progress (for example when a handshake times out)
     pub fn format_handshake_initiation<'a>(
         &self,
         dst: &'a mut [u8],
         force_resend: bool,
+    ) -> TunnResult<'a> {
+        self.format_handshake_initiation_add1(dst, force_resend, &[])
+    }
+
+    fn format_handshake_initiation_add1<'a>(
+        &self,
+        dst: &'a mut [u8],
+        force_resend: bool,
+        add: &[u8],
     ) -> TunnResult<'a> {
         let mut handshake = self.handshake.lock();
         if handshake.is_in_progress() && !force_resend {
@@ -449,7 +502,7 @@ impl Tunn {
 
         let starting_new_handshake = !handshake.is_in_progress();
 
-        match handshake.format_handshake_initiation(dst) {
+        match handshake.format_handshake_initiation(dst, add) {
             Ok(packet) => {
                 debug!(self.logger, "Sending handshake_initiation");
 
@@ -457,7 +510,7 @@ impl Tunn {
                     self.timer_tick(TimerName::TimeLastHandshakeStarted);
                 }
                 self.timer_tick(TimerName::TimeLastPacketSent);
-                TunnResult::WriteToNetwork(packet)
+                TunnResult::WriteToNetwork(packet, None)
             }
             Err(e) => TunnResult::Err(e),
         }

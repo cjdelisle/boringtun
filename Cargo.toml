@@ -31,6 +31,11 @@ jni = "0.10"
 [lib]
 crate-type = ["lib", "staticlib", "dylib"]
 
+[features]
+# This is a protocol change from the original WireGuard protocol, it allows additional data to be
+# Piggybacked on top of an INIT handshake message.
+additional_data = []
+
 [[bin]]
 name = "boringtun"
 path = "src/main.rs"

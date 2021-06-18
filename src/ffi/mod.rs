@@ -67,7 +67,7 @@ impl<'a> From<TunnResult<'a>> for wireguard_result {
                 op: result_type::WIREGUARD_ERROR,
                 size: e as _,
             },
-            TunnResult::WriteToNetwork(b) => wireguard_result {
+            TunnResult::WriteToNetwork(b, _) => wireguard_result {
                 op: result_type::WRITE_TO_NETWORK,
                 size: b.len(),
             },

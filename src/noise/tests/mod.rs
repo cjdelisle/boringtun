@@ -17,6 +17,8 @@ mod tests {
     use std::sync::Arc;
     use std::thread;
     use std::time::Duration;
+    #[cfg(not(target_arch = "arm"))]
+    use ring::rand::*;
 
     // Simple counter, atomically increasing by one each call
     struct AtomicCounter {
@@ -167,6 +169,26 @@ mod tests {
         packet
     }
 
+    fn rand_additional() -> Option<Vec<u8>> {
+        if !cfg!(feature = "additional_data") {
+            None
+        } else {
+            let rng = SystemRandom::new();
+            let mut bytes = [0u8; 128];
+            rng.fill(&mut bytes[..]).unwrap();
+            let len = (bytes[0] % 128) as usize;
+            Some(Vec::from(&bytes[..len]))
+        }
+    }
+
+    fn peer_encapsulate<'a>(peer: &Tunn, src: &[u8], dst: &'a mut [u8], add: &Option<Vec<u8>>) -> TunnResult<'a> {
+        #[cfg(feature = "additional_data")]
+        if let Some(vec) = add {
+            return peer.encapsulate_add(src, dst, &vec)
+        }
+        peer.encapsulate(src, dst)
+    }
+
     // Start a WireGuard peer
     fn wireguard_test_peer(
         network_socket: UdpSocket,
@@ -174,6 +196,8 @@ mod tests {
         peer_static_public: &str,
         logger: Logger,
         close: Arc<AtomicBool>,
+        send_add: Option<Vec<u8>>,
+        expect_add: Option<Vec<u8>>,
     ) -> UdpSocket {
         let static_private = static_private.parse().unwrap();
         let peer_static_public = peer_static_public.parse().unwrap();
@@ -210,6 +234,7 @@ mod tests {
             let iface_socket = iface_socket.try_clone().unwrap();
             let peer = peer.clone();
             let close = close.clone();
+            let expect_add1 = expect_add.clone();
 
             thread::spawn(move || loop {
                 // Listen on the network
@@ -227,13 +252,19 @@ mod tests {
                 };
 
                 match peer.decapsulate(None, &recv_buf[..n], &mut send_buf) {
-                    TunnResult::WriteToNetwork(packet) => {
+                    TunnResult::WriteToNetwork(packet, add) => {
+                        if packet[0] == 0x01 {
+                            assert_eq!(expect_add1, add);
+                        }
                         network_socket.send(packet).unwrap();
                         // Send form queue?
                         loop {
                             let mut send_buf = [0u8; MAX_PACKET];
                             match peer.decapsulate(None, &[], &mut send_buf) {
-                                TunnResult::WriteToNetwork(packet) => {
+                                TunnResult::WriteToNetwork(packet, add) => {
+                                    if packet[0] == 0x01 {
+                                        assert_eq!(expect_add1, add);
+                                    }
                                     network_socket.send(packet).unwrap();
                                 }
                                 _ => {
@@ -273,8 +304,8 @@ mod tests {
                     }
                 };
 
-                match peer.encapsulate(&recv_buf[..n], &mut send_buf) {
-                    TunnResult::WriteToNetwork(packet) => {
+                match peer_encapsulate(&peer, &recv_buf[..n], &mut send_buf, &send_add) {
+                    TunnResult::WriteToNetwork(packet, _) => {
                         network_socket.send(packet).unwrap();
                     }
                     _ => {}
@@ -289,7 +320,8 @@ mod tests {
 
             let mut send_buf = [0u8; MAX_PACKET];
             match peer.update_timers(&mut send_buf) {
-                TunnResult::WriteToNetwork(packet) => {
+                TunnResult::WriteToNetwork(packet, add) => {
+                    assert_eq!(add, expect_add);
                     network_socket.send(packet).unwrap();
                 }
                 _ => {}
@@ -323,6 +355,9 @@ mod tests {
         let server_pair = key_pair();
         let client_pair = key_pair();
 
+        let add_sc = rand_additional();
+        let add_cs = rand_additional();
+
         let logger = Logger::root(
             slog_term::FullFormat::new(slog_term::PlainSyncDecorator::new(std::io::stdout()))
                 .build()
@@ -336,6 +371,8 @@ mod tests {
             &client_pair.1,
             logger.new(o!("server" => "")),
             close.clone(),
+            add_sc.clone(),
+            add_cs.clone(),
         );
 
         let c_iface = wireguard_test_peer(
@@ -344,6 +381,8 @@ mod tests {
             &server_pair.1,
             logger.new(o!("client" => "")),
             close.clone(),
+            add_cs,
+            add_sc,
         );
 
         (s_iface, c_iface, close)
@@ -479,6 +518,8 @@ mod tests {
             &wg.public_key,
             logger.new(o!()),
             close.clone(),
+            None,
+            None,
         );
 
         c_iface
@@ -524,6 +565,8 @@ mod tests {
             &wg.public_key,
             logger,
             close.clone(),
+            None,
+            None,
         );
 
         c_iface

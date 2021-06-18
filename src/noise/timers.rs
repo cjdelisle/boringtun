@@ -159,7 +159,16 @@ impl Tunn {
         }
     }
 
+    #[cfg(feature = "additional_data")]
+    pub fn update_timers_add<'a>(&self, dst: &'a mut [u8], add: &[u8]) -> TunnResult<'a> {
+        self.update_timers_add1(dst, add)
+    }
+
     pub fn update_timers<'a>(&self, dst: &'a mut [u8]) -> TunnResult<'a> {
+        self.update_timers_add1(dst, &[])
+    }
+
+    fn update_timers_add1<'a>(&self, dst: &'a mut [u8], add: &[u8]) -> TunnResult<'a> {
         let mut handshake_initiation_required = false;
         let mut keepalive_required = false;
 
@@ -297,7 +306,7 @@ impl Tunn {
         }
 
         if handshake_initiation_required {
-            return self.format_handshake_initiation(dst, true);
+            return self.format_handshake_initiation_add1(dst, true, add);
         }
 
         if keepalive_required {
