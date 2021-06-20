@@ -279,7 +279,7 @@ impl Tunn {
         self.handle_verified_packet(packet, dst, None)
     }
 
-    pub(crate) fn handle_verified_packet<'a>(
+    pub fn handle_verified_packet<'a>(
         &self,
         packet: Packet,
         dst: &'a mut [u8],
