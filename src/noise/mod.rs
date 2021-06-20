@@ -49,12 +49,26 @@ pub enum TunnResult<'a> {
     WriteToNetwork(&'a mut [u8], Option<Vec<u8>>),
     WriteToTunnelV4(&'a mut [u8], Ipv4Addr),
     WriteToTunnelV6(&'a mut [u8], Ipv6Addr),
+    CustomData(&'a mut [u8]),
 }
 
 impl<'a> From<WireGuardError> for TunnResult<'a> {
     fn from(err: WireGuardError) -> TunnResult<'a> {
         TunnResult::Err(err)
     }
+}
+
+#[derive(Default)]
+pub struct TunnFlag(pub i32);
+impl TunnFlag {
+    /// If set then this tunnel will output messages as CustomData rather than IPv4 / IPv6 packets.
+    pub const CUSTOM_DATA: i32 = 1;
+
+    /// Set CustomData flag
+    pub fn with_custom_data(self) -> Self { TunnFlag(self.0 | Self::CUSTOM_DATA) }
+
+    /// True if the CustomData flag is set
+    pub fn custom_data(&self) -> bool { (self.0 & Self::CUSTOM_DATA) != 0 }
 }
 
 /// Tunnel represents a point-to-point WireGuard connection
@@ -67,6 +81,7 @@ pub struct Tunn {
     timers: timers::Timers, // Keeps tabs on the expiring timers
     tx_bytes: AtomicUsize,
     rx_bytes: AtomicUsize,
+    flags: TunnFlag,
 
     rate_limiter: Arc<RateLimiter>,
 
@@ -133,6 +148,7 @@ impl Tunn {
         persistent_keepalive: Option<u16>,
         index: u32,
         rate_limiter: Option<Arc<RateLimiter>>,
+        flags: Option<TunnFlag>,
     ) -> Result<Box<Tunn>, &'static str> {
         let static_public = Arc::new(static_private.public_key());
 
@@ -152,6 +168,7 @@ impl Tunn {
             current: Default::default(),
             tx_bytes: Default::default(),
             rx_bytes: Default::default(),
+            flags: flags.unwrap_or_default(),
 
             packet_queue: Mutex::new(VecDeque::new()),
             timers: Timers::new(persistent_keepalive, rate_limiter.is_none()),
@@ -460,7 +477,17 @@ impl Tunn {
 
         self.timer_tick(TimerName::TimeLastPacketReceived);
 
-        Ok(self.validate_decapsulated_packet(decapsulated_packet))
+        if self.flags.custom_data() {
+            if !decapsulated_packet.is_empty() {
+                self.timer_tick(TimerName::TimeLastDataPacketReceived);
+                self.rx_bytes.fetch_add(decapsulated_packet.len(), Ordering::Relaxed);
+                Ok(TunnResult::CustomData(decapsulated_packet))
+            } else {
+                Ok(TunnResult::Done)
+            }
+        } else {
+            Ok(self.validate_decapsulated_packet(decapsulated_packet))
+        }
     }
 
     // Formats a new handshake initiation message and store it in dst. If force_resend is true will send

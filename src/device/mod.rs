@@ -343,6 +343,7 @@ impl<T: Tun, S: Sock> Device<T, S> {
             keepalive,
             next_index,
             None,
+            None,
         )
         .unwrap();
 
@@ -649,6 +650,7 @@ impl<T: Tun, S: Sock> Device<T, S> {
                         .handle_verified_packet(parsed_packet, &mut t.dst_buf[..], half_handshake)
                     {
                         TunnResult::Done => {}
+                        TunnResult::CustomData(_) |
                         TunnResult::Err(_) => continue,
                         TunnResult::WriteToNetwork(packet, _) => {
                             flush = true;
@@ -719,6 +721,7 @@ impl<T: Tun, S: Sock> Device<T, S> {
                     {
                         TunnResult::Done => {}
                         TunnResult::Err(e) => eprintln!("Decapsulate error {:?}", e),
+                        TunnResult::CustomData(_) => eprintln!("Decapsulate error: Invalid data"),
                         TunnResult::WriteToNetwork(packet, _) => {
                             flush = true;
                             udp.write(packet);

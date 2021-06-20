@@ -35,6 +35,15 @@ pub enum result_type {
     WRITE_TO_TUNNEL_IPV4 = 4,
     /// Write dst buffer to the interface as an ipv6 packet. Size indicates the number of bytes to write.
     WRITE_TO_TUNNEL_IPV6 = 6,
+    /// Custom data in case the tun device was created with the custom data flag enabled.
+    CUSTOM_DATA = 8,
+}
+
+#[allow(non_camel_case_types)]
+#[repr(C)]
+pub enum flag {
+    /// If set then this tunnel will output messages as CUSTOM_DATA rather than IPv4 / IPv6 packets.
+    F_CUSTOM_DATA = TunnFlag::CUSTOM_DATA as isize,
 }
 
 /// The return type of WireGuard functions
@@ -62,6 +71,10 @@ impl<'a> From<TunnResult<'a>> for wireguard_result {
             TunnResult::Done => wireguard_result {
                 op: result_type::WIREGUARD_DONE,
                 size: 0,
+            },
+            TunnResult::CustomData(b) => wireguard_result {
+                op: result_type::CUSTOM_DATA,
+                size: b.len(),
             },
             TunnResult::Err(e) => wireguard_result {
                 op: result_type::WIREGUARD_ERROR,
@@ -176,6 +189,7 @@ pub unsafe extern "C" fn new_tunnel(
     index: u32,
     log_printer: Option<unsafe extern "C" fn(*const c_char)>,
     log_level: u32,
+    flags: i32,
 ) -> *mut Tunn {
     let c_str = CStr::from_ptr(static_private);
     let static_private = match c_str.to_str() {
@@ -212,6 +226,7 @@ pub unsafe extern "C" fn new_tunnel(
         keep_alive,
         index,
         None,
+        Some(TunnFlag(flags)),
     ) {
         Ok(t) => t,
         Err(_) => return ptr::null_mut(),
