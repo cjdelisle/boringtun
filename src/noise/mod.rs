@@ -62,13 +62,13 @@ impl<'a> From<WireGuardError> for TunnResult<'a> {
 pub struct TunnFlag(pub i32);
 impl TunnFlag {
     /// If set then this tunnel will output messages as CustomData rather than IPv4 / IPv6 packets.
-    pub const CUSTOM_DATA: i32 = 1;
+    pub const CUSTOM_DATA: Self = Self(1);
 
     /// Set CustomData flag
-    pub fn with_custom_data(self) -> Self { TunnFlag(self.0 | Self::CUSTOM_DATA) }
+    pub fn with_custom_data(self) -> Self { TunnFlag(self.0 | Self::CUSTOM_DATA.0) }
 
     /// True if the CustomData flag is set
-    pub fn custom_data(&self) -> bool { (self.0 & Self::CUSTOM_DATA) != 0 }
+    pub fn custom_data(&self) -> bool { (self.0 & Self::CUSTOM_DATA.0) != 0 }
 }
 
 /// Tunnel represents a point-to-point WireGuard connection

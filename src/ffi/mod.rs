@@ -43,7 +43,7 @@ pub enum result_type {
 #[repr(C)]
 pub enum flag {
     /// If set then this tunnel will output messages as CUSTOM_DATA rather than IPv4 / IPv6 packets.
-    F_CUSTOM_DATA = TunnFlag::CUSTOM_DATA as isize,
+    F_CUSTOM_DATA = TunnFlag::CUSTOM_DATA.0 as isize,
 }
 
 /// The return type of WireGuard functions
