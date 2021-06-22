@@ -216,7 +216,7 @@ impl Tunn {
     /// We also do not clear the existing sessions because there's nothing wrong with
     /// continuing to use them, we're just going to use a new preshared key for the next
     /// handshake.
-    pub fn set_preshared_key(&mut self, preshared_key: Option<[u8; 32]>) {
+    pub fn set_preshared_key(&self, preshared_key: Option<[u8; 32]>) {
         self.handshake.lock().set_preshared_key(preshared_key);
     }
 
