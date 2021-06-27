@@ -47,7 +47,6 @@ const N_BITS: u64 = WORD_SIZE * N_WORDS;
 struct ReceivingKeyCounterValidator {
     // In order to avoid replays while allowing for some reordering of the packets, we keep a
     // bitmap of received packets, and the value of the highest counter
-    next: u64,
     stats: SessionStats,
     bitmap: [u64; N_WORDS as usize],
 }
@@ -90,11 +89,11 @@ impl ReceivingKeyCounterValidator {
     #[inline(always)]
     #[cfg(test)]
     fn will_accept(&mut self, counter: u64) -> bool {
-        if counter >= self.next {
+        if counter >= self.stats.expected_cnt {
             // As long as the counter is growing no replay took place for sure
             return true;
         }
-        if counter + N_BITS < self.next {
+        if counter + N_BITS < self.stats.expected_cnt {
             // Drop if too far back
             self.stats.too_old_cnt += 1;
             return false;
@@ -111,19 +110,19 @@ impl ReceivingKeyCounterValidator {
     // decryption something changed)
     #[inline(always)]
     fn mark_did_receive(&mut self, counter: u64) -> Result<(), WireGuardError> {
-        if counter + N_BITS < self.next {
+        if counter + N_BITS < self.stats.expected_cnt {
             // Drop if too far back
             self.stats.too_old_cnt += 1;
             return Err(WireGuardError::InvalidCounter);
         }
-        if counter == self.next {
+        if counter == self.stats.expected_cnt {
             // Usually the packets arrive in order, in that case we simply mark the bit and
             // increment the counter
             self.set_bit(counter);
-            self.next += 1;
+            self.stats.expected_cnt += 1;
             return Ok(());
         }
-        if counter < self.next {
+        if counter < self.stats.expected_cnt {
             // A packet arrived out of order, check if it is valid, and mark
             if self.check_bit(counter) {
                 self.stats.duplicate_cnt += 1;
@@ -133,13 +132,13 @@ impl ReceivingKeyCounterValidator {
             return Ok(());
         }
         // Packets where dropped, or maybe reordered, skip them and mark unused
-        if counter - self.next >= N_BITS {
+        if counter - self.stats.expected_cnt >= N_BITS {
             // Too far ahead, clear all the bits
             for c in self.bitmap.iter_mut() {
                 *c = 0;
             }
         } else {
-            let mut i = self.next;
+            let mut i = self.stats.expected_cnt;
             while i % WORD_SIZE != 0 && i < counter {
                 // Clear until i aligned to word size
                 self.clear_bit(i);
@@ -157,7 +156,7 @@ impl ReceivingKeyCounterValidator {
             }
         }
         self.set_bit(counter);
-        self.next = counter + 1;
+        self.stats.expected_cnt = counter + 1;
         Ok(())
     }
 }
@@ -297,7 +296,7 @@ impl Session {
     // Returns the estimated downstream packet loss for this session
     pub(super) fn current_packet_cnt(&self) -> (u64, u64) {
         let counter_validator = self.receiving_key_counter.lock();
-        (counter_validator.next, counter_validator.stats.received_cnt)
+        (counter_validator.stats.expected_cnt, counter_validator.stats.received_cnt)
     }
 
     pub(super) fn stats(&self) -> SessionStats {
