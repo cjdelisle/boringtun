@@ -152,6 +152,7 @@ pub unsafe extern "C" fn create_new_tunnel(
         index as u32,
         Some(log_print),
         3,
+        0,
     );
 
     if tunnel.is_null() {
